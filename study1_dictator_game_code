@@ -1,0 +1,1410 @@
+                                          ##################===============================#######################
+                                          #                     META DATA AND ORGANIZING                         #
+                                          ##################=================================#####################
+library(plotly)
+library(here)
+library(readr)
+library(dplyr)
+library(stringr)
+library(dplyr)
+library(ggplot2)
+library(svglite)
+library(tidyr)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(ggpubr)
+library(car)
+library(corrplot)
+library(broom.mixed)  # for tidy() on mixed models
+library(emmeans)
+library(corrr)
+library(patchwork)
+library(influence.ME)
+library(binom)
+library(rstatix)
+library(ez)
+                                          library(performance)
+                                         
+                                      
+setwd("C:/Users/raika/Desktop/PhD/projects/dg_data")
+
+# Set project root for here()
+here::i_am("scripts/dg_analysis.R")  # adjust path to this script
+
+
+# Main data folder
+main_data_folder <- here("data")
+
+# List all immediate subfolders (condition folders)
+folders <- list.dirs(main_data_folder, full.names = TRUE, recursive = FALSE)
+
+all_data <- data.frame()
+
+# Loop through each condition folder
+for (folder_path in folders) {
+  
+  # Extract condition name from folder name (e.g., "neutral_condition" -> "neutral")
+  cond <- basename(folder_path) %>% str_replace("_condition", "")
+  
+  # List all CSV files (case-insensitive)
+  file_list <- list.files(folder_path, pattern = "(?i)\\.csv$", full.names = TRUE)
+  
+  if (length(file_list) == 0) {
+    cat("No CSV files in folder:", folder_path, "\n")
+    next
+  }
+  
+  # Loop over files individually to preserve filename info
+  for (f in file_list) {
+    df <- read.csv(f)
+    
+    # Add condition and filename
+    df$condition <- cond
+    df$filename  <- basename(f)
+    
+    # Extract & print user IDs alongside filename
+    if ("pid" %in% names(df)) {  # replace "pid" with your actual user ID column
+      cat("File:", basename(f), "| User IDs:", unique(df$pid), "\n")
+    }
+    
+    all_data <- bind_rows(all_data, df)
+  }
+} 
+  
+  
+
+#head(all_data)
+colnames(all_data)
+# Create IDs
+all_data <- all_data %>%
+  # Overall unique ID across all users
+  mutate(
+    pid_overall = paste0(
+      "p", str_pad(as.numeric(factor(user_id, levels = unique(user_id))),
+                   width = 3, pad = "0")
+    )
+  ) %>%
+  group_by(condition) %>%
+  mutate(
+    # Condition-specific ID (starts at 001 for each condition)
+    pid_condition = paste0(
+      substr(condition, 1, 1),  # n/h/l prefix
+      str_pad(as.numeric(factor(user_id, levels = unique(user_id))),
+              width = 3, pad = "0")
+    )
+  ) %>%
+  ungroup() 
+
+# View first rows
+head(all_data)
+
+all_data
+
+#colnames(all_data)
+
+write.csv(all_data, "all_data.csv", row.names = FALSE) #save the csv file 
+
+##################=================================#####################
+#                     Consolidated trial data                          #
+##################=================================#####################
+trial_df <- all_data %>%
+  
+  filter(current_image != "") %>%
+  select(
+    condition,
+    user_id,
+    pid_overall,
+    pid_condition,
+    filename,
+    date,
+    current_image,
+    random_num,
+    pro_other,
+    pro_self,
+    self_other,
+    self_self,
+    selection_side = key_pressed,
+    response_time,
+    decision,
+    trial_point_self,
+    trial_point_other,
+    sad_rating,
+    angry_rating,
+    feel_rating,
+  ) %>%
+  mutate(
+    # get file name
+    file_name = basename(current_image),
+    # extract face_id before underscore (e.g. 14 from "14_N.jpg")
+    face_id   = str_extract(file_name, "^[0-9]+")
+  )%>%
+  group_by(user_id) %>%       # or pid if you prefer
+  mutate(trial_number = row_number()) %>%
+  ungroup() %>%
+  mutate(
+    expression = case_when(
+      str_detect(current_image, regex("_AD\\.(jpg|jpeg)$", ignore_case = TRUE)) ~ "angry-dominant_(30S/70A)",
+      str_detect(current_image, regex("_A\\.(jpg|jpeg)$",  ignore_case = TRUE)) ~ "angry_(0S/100A)",
+      str_detect(current_image, regex("_SD\\.(jpg|jpeg)$", ignore_case = TRUE)) ~ "sad-dominant_(70S/30A)",
+      str_detect(current_image, regex("_S\\.(jpg|jpeg)$",  ignore_case = TRUE)) ~ "sad_(100S/0A)",
+      str_detect(current_image, regex("_HF\\.(jpg|jpeg)$", ignore_case = TRUE)) ~ "half-half_(50S/50A)",
+      str_detect(current_image, regex("_N\\.(jpg|jpeg)$",  ignore_case = TRUE)) ~ "neutral_(0S/0A)",
+      TRUE ~ NA_character_
+    ),
+    pro_social = as.numeric(decision == "prosocial"),
+    selfish_choice = as.numeric(decision == "selfish")
+  )
+
+#desired_order <- c("neutral_(0S/0A)","sad_(100S/0A)","sad-dominant_(70S/30A)","half-half_(50S/50A)","angry-dominant_(30S/70A)","angry_(0S/100A")
+
+#Neutral face ratings
+
+neutral_ratings <- all_data %>%
+  filter(neu_image != "") %>%
+  select(
+    pid_overall,
+    pid_condition,
+    likeability_rating,
+    trustworthiness_rating,
+    attract_rating,
+    dominant_rating,
+    neu_image
+  ) %>%
+  mutate(
+    file_name = basename(neu_image),
+    face_id = str_extract(file_name, "^[0-9]+")
+  )
+
+tail(neutral_ratings)
+
+#Join with neutral_ratings by pid + face_id
+trial_df <- trial_df %>%
+  left_join(
+    neutral_ratings %>%
+      select(pid_overall, face_id, likeability_rating, trustworthiness_rating, attract_rating, dominant_rating),
+    by = c("pid_overall", "face_id")
+  ) %>%
+  
+  select(
+    condition,
+    filename,
+    user_id,
+    pid_condition,
+    pid_overall,
+    date,
+    face_id,
+    likeability_rating, 
+    trustworthiness_rating,
+    attract_rating, 
+    dominant_rating,
+    trial_number,
+    expression,
+    everything()
+  )
+
+#trial wise information
+head(trial_df)
+write.csv(trial_df, "trial_df.csv", row.names = FALSE)
+
+
+##################=================================#####################
+#                         Attention checks                             #
+##################=================================#####################
+
+att_check1_df <- all_data %>%
+ group_by(filename, pid_overall, pid_condition, user_id) %>%
+
+mutate(att_check_1 = ifelse(attention_check == "correct_att", 1, 0)) %>%
+ # Summarize per participant
+ summarise(
+  total_att_check_1 = sum(att_check_1),
+  att_check_1_status = ifelse(total_att_check_1 < 3, "fail", "pass")
+ )
+
+att_check1_df %>%
+  filter(att_check_1_status == "pass") %>%
+  print(n = nrow(.))
+
+
+att_check2_df <- trial_df %>%
+       group_by(pid_overall) %>%
+      summarise(
+            choice_count_pro = sum(pro_social),
+           choice_count_selfish = sum(selfish_choice),
+          att_check_2_status = ifelse(choice_count_pro > 115 | choice_count_selfish > 115, "fail", "pass")
+  )
+
+sum(att_check2_df$att_check_2_status == "fail")
+
+##################=================================#####################
+#                         Calculate SVO                                #
+##################=================================#####################
+
+# 1) read payoff matrix (CSV should have columns: SV, ID, for_me, for_other)
+
+payoffs <- read_csv("combined_SVO_data.csv", col_types = cols(
+  SV = col_character(),
+  ID = col_integer(),
+  for_me = col_double(),
+  for_other = col_double()
+))
+
+# Ensure SV order matches item order in your task (SV01..SV15)
+sv_codes <- unique(payoffs$SV) # expects SV01, SV02, ..., in order in the CSV
+#sv_codes
+# 2) list of SVO columns in your all_data (exact names)
+#svo_cols <- c(
+  #"SVO_survey.block_1/SVO1.Row 1",  "SVO_survey.block_1/SVO2.Row 1",
+ # "SVO_survey.block_1/SVO3.Row 1",  "SVO_survey.block_1/SVO4.Row 1",
+#  "SVO_survey.block_1/SVO5.Row 1",  "SVO_survey.block_1/SVO6.Row 1",
+  #"SVO_survey.block_1/SVO7.Row 1",  "SVO_survey.block_1/SVO8.Row 1",
+ # "SVO_survey.block_1/SVO9.Row 1",  "SVO_survey.block_1/SVO10.Row 1",
+#  "SVO_survey.block_1/SVO11.Row 1", "SVO_survey.block_1/SVO12.Row 1",
+  #"SVO_survey.block_1/SVO13.Row 1", "SVO_survey.block_1/SVO14.Row 1",
+ # "SVO_survey.block_1/SVO15.Row 1"
+#)
+
+svo_scores <- all_data %>%
+  select(pid_overall, contains("SVO_survey")) %>%   # selects all columns that contain "SVO"
+  drop_na() 
+
+#svo_scores
+
+svo_long <- svo_scores %>%
+  pivot_longer( #creates a name and value column
+    cols = contains("SVO_survey"),
+    names_to = "svo_options",
+    values_to = "svo_choice"
+  ) %>%
+  mutate(
+    svo_choice = suppressWarnings(as.integer(svo_choice)),  # convert to numeric
+    item = as.integer(str_extract(svo_options, "(?<=SVO)\\d+")), # get item number
+    SV = sv_codes[item]                                       # map to SV code
+  ) %>%
+  filter(!is.na(svo_choice))
+
+#svo_long
+
+# 2) Compute SVO scores
+svo_scores <- svo_long %>%
+  left_join(payoffs, by = c("SV" = "SV", "svo_choice" = "ID")) %>%  # match with svo_choice now
+  group_by(pid_overall) %>%
+  summarise(
+    mean_self = mean(for_me, na.rm = TRUE),
+    mean_other = mean(for_other, na.rm = TRUE),
+    svo_angle = atan2(mean_other - 50, mean_self - 50) * 180 / pi,
+    classification = case_when(
+      svo_angle > 57.15 ~ "Altruistic",
+      svo_angle > 22.45 ~ "Prosocial",
+      svo_angle > -12.04 ~ "Individualistic",
+      TRUE ~ "Competitive"
+    ),
+    .groups = "drop"
+  )
+
+svo_scores
+# display the scored dataframe
+
+##################=================================#####################
+#             Calculate Trait-empathy and social anxiety               #
+##################=================================#####################
+
+###Rename columns for simplification
+
+#Get all column names from all_data
+all_colnames <- colnames(all_data)
+#all_colnames
+
+#Filter columns starting with "TE_survey.block_1/"
+te_cols <- all_colnames[str_starts(all_colnames, "TE_survey.block_1")]
+sias_cols <- all_colnames[str_starts(all_colnames, "SIAS_suvey.block_1.")]
+#sias_cols
+
+#Extract part after "TE_survey.block_1/"
+short_te <- str_extract(te_cols, "(?<=TE_survey\\.block_1/)[^\\.]+")  
+short_sias <- str_extract(sias_cols, "(?<=SIAS_suvey\\.block_1/)[^\\.]+")  
+
+#Remove dash and trailing numbers, keep only "TE" + number
+short_te_clean <- str_replace(short_te, "-.*$", "")  # e.g. "TE1-1" -> "TE1"
+short_sias_clean <- str_replace(short_sias, "-.*$", "")
+
+#Make sequential TE1, TE2,
+new_te_names <- paste0("TE", seq_along(short_te_clean))
+new_sias_names <- paste0("SIAS", seq_along(short_sias_clean))
+
+# Check renamed columns
+#new_te_names
+#new_sias_names
+
+#Extract TE values + pid to a separate dataframe
+te_subscales <- all_data %>%
+  select(pid_overall, pid_condition, all_of(te_cols)) %>%      # bring only pid + TE columns
+  rename_at(vars(all_of(te_cols)), ~ new_te_names) %>%  # rename columns
+  na.omit()   
+
+#te_subscales
+
+# Step 7: Extract SIAS values + pid to a separate dataframe
+sias_scale <- all_data %>%
+  select(pid_overall, pid_condition, all_of(sias_cols)) %>%
+  rename_at(vars(all_of(sias_cols)), ~ new_sias_names) %>%
+  na.omit()
+ #put the values back in all data.
+
+#te_subscales
+# Subscales of TE
+
+# Cognitive TE
+te_subscales$cog_te <- rowSums(te_subscales[, c("TE1","TE3","TE4","TE5","TE6","TE15","TE16","TE18","TE19","TE20","TE21","TE22","TE24","TE25","TE26","TE27","TE28","TE30","TE31")], na.rm = TRUE)
+
+# Affective TE
+te_subscales$aff_te <- rowSums(te_subscales[, c("TE2","TE7","TE8","TE9","TE10","TE11","TE12","TE13","TE14","TE17","TE23","TE29")], na.rm = TRUE)
+
+# Perspective-taking TE
+te_subscales$persp_te <- rowSums(te_subscales[, c("TE15","TE16","TE19","TE20","TE21","TE22","TE24","TE25","TE26","TE27")], na.rm = TRUE)
+
+# Online simulation TE
+te_subscales$online_te <- rowSums(te_subscales[, c("TE1","TE3","TE4","TE5","TE6","TE18","TE28","TE30","TE31")], na.rm = TRUE)
+
+# Emotional contagion TE
+te_subscales$emot_contagion_te <- rowSums(te_subscales[, c("TE8","TE9","TE13","TE14")], na.rm = TRUE)
+
+# Peripheral response TE
+te_subscales$periph_resp_te <- rowSums(te_subscales[, c("TE2","TE11","TE17","TE29")], na.rm = TRUE)
+
+# Proximal response TE
+te_subscales$prox_resp_te <- rowSums(te_subscales[, c("TE7","TE10","TE12","TE13")], na.rm = TRUE)
+
+# TE total
+te_subscales$TE_total <- rowSums(te_subscales[, new_te_names], na.rm = TRUE)
+
+#sias_scale
+#SIAS-D calculation
+sias_scale$SIAS_total <- rowSums(sias_scale[, new_sias_names], na.rm = TRUE)
+#sias_scale$SIAS_total
+
+#mutate all values to data
+
+
+##################=================================#####################
+#                         Meta-data organizing                         #
+##################=================================#####################
+
+
+demo_cols <- c("user_id", "pid_overall", "pid_condition",
+               "wc_survey.block_1.Age", 
+               "wc_survey.block_1.Gender", 
+               "wc_survey.block_1.Occupation", 
+               "wc_survey.block_1.SES", 
+               "wc_survey.block_1.Mood")
+
+existing_demo_cols <- intersect(demo_cols, colnames(all_data))
+
+clean_demo_cols <- gsub("^wc_survey\\.block_1\\.", "", existing_demo_cols)
+
+
+demo_df <- all_data %>%
+  select(all_of(existing_demo_cols)) %>%
+  # rename columns to remove prefix
+  setNames(clean_demo_cols) %>%
+  # drop rows with NA in any demographic field
+  filter(if_all(c("Age", "Gender", "Occupation", "SES", "Mood"), ~ !is.na(.))) %>%
+  # keep one row per pid_condition
+  distinct(pid_condition, .keep_all = TRUE)
+
+tail(demo_df)
+
+# STEP 2: Clean induction texts
+# -----------------------------
+
+# STEP 2: Clean induction texts
+text_cols <- c("pid_condition",
+               "enter_text_2.text",
+               "enter_text_1.text",
+               "enter_text.text")
+
+induction_df <- all_data %>%
+  select(all_of(text_cols)) %>%
+  # Convert blanks "" to NA
+  mutate(across(starts_with("enter_text"), ~ na_if(., ""))) %>%
+  # Remove rows where all three text fields are NA
+  filter(if_any(starts_with("enter_text"), ~ !is.na(.))) %>%
+  distinct(pid_condition, .keep_all = TRUE)
+
+induction_df
+
+
+# Rename text columns if they exist
+induction_df <- induction_df %>%
+  rename(
+    neutral_induction_text = "enter_text_2.text",
+    high_induction_text    = "enter_text_1.text",
+    low_induction_text     = "enter_text.text"
+  )
+#write.csv(induction_df, "induction_df.csv", row.names = FALSE)
+
+
+# Define the column names you want from te_subscales df
+te_subscales_names <- c("pid_overall", "pid_condition", 
+                        "cog_te", "aff_te", "online_te", "persp_te",
+                        "emot_contagion_te", "periph_resp_te", 
+                        "prox_resp_te", "TE_total")
+
+# Clean TE dataframe
+te_df <- te_subscales %>%
+  select(any_of(te_subscales_names)) %>%
+  distinct(pid_condition, .keep_all = TRUE)
+
+# Clean SIAS dataframe
+sias_df <- sias_scale %>%
+  select(pid_overall, pid_condition, SIAS_total) %>%
+  distinct(pid_condition, .keep_all = TRUE)
+
+meta_data <- demo_df %>%
+  left_join(induction_df, by = "pid_condition")%>%
+  left_join(te_df, by = "pid_condition") %>%
+  left_join(sias_df, by = "pid_condition") %>%
+  left_join(svo_scores, by = "pid_overall")%>%
+  select(-pid_overall.y, -pid_overall)
+
+meta_data
+
+write.csv(meta_data,"meta_data.csv", row.names = FALSE)
+
+#Desired order of expressions for data
+
+
+desired_order <- c(
+  "neutral_(0S/0A)",
+  "sad_(100S/0A)",
+  "sad-dominant_(70S/30A)",
+  "half-half_(50S/50A)",
+  "angry-dominant_(30S/70A)",
+  "angry_(0S/100A)"
+)
+# Participant-level prosocial rates
+participant_summary <- trial_df %>%
+  mutate(expression = factor(expression, levels = desired_order)) %>%
+  group_by(pid_overall, condition, expression) %>%
+  summarise(
+    prosocial_rate = mean(pro_social, na.rm = TRUE) * 100,
+    selfish_rate   = mean(selfish_choice, na.rm = TRUE) * 100,
+    rt_mean_pro   = mean(response_time[pro_social == 1], na.rm = TRUE),
+    rt_mean_self  = mean(response_time[selfish_choice == 1], na.rm = TRUE),
+    rt_mean_pro_filter    = mean(response_time[pro_social == 1 & response_time < 10], na.rm = TRUE),
+    rt_mean_self_filter   = mean(response_time[selfish_choice == 1 & response_time < 10], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+summary_table_exp <- trial_df %>%
+  mutate(expression = factor(expression, levels = desired_order)) %>%
+  group_by(expression, condition) %>%
+  summarise(
+    N_participants = n_distinct(pid_overall),
+    N_trials       = n(),
+    
+    # PROSOCIAL DESCRIPTIVES
+    pro_sum  = sum(pro_social, na.rm = TRUE),
+    pro_mean = mean(pro_social, na.rm = TRUE) * 100,
+    pro_sd   = sd(pro_social, na.rm = TRUE) * 100,
+    
+    #Selfish descriptives
+    self_sum  = sum(selfish_choice, na.rm = TRUE),
+    self_mean = mean(selfish_choice, na.rm = TRUE) * 100,
+    self_sd   = sd(selfish_choice, na.rm = TRUE) * 100,
+    
+    # RTs prosocial
+    rt_mean_pro = round(mean(response_time[pro_social == 1], na.rm = TRUE), 2),
+    rt_sd_pro  = round(sd(response_time[pro_social == 1], na.rm = TRUE), 2),
+    
+    # RTs selfish 
+    rt_mean_self = round(mean(response_time[selfish_choice == 1], na.rm = TRUE), 2),
+    rt_sd_self  = round(sd(response_time[selfish_choice == 1], na.rm = TRUE), 2),
+    
+    # filtered trials (RT < 10s)
+    N_trials_filter = sum(response_time <= 10, na.rm = TRUE),
+    pct_excluded   = round((1 - N_trials_filter / N_trials) * 100, 2),
+    
+    # RTs prosocial (filtered)
+    rt_mean_pro_filter = round(mean(response_time[pro_social == 1 & response_time < 10], na.rm = TRUE), 2),
+    rt_sd_pro_filter   = round(sd(response_time[pro_social == 1 & response_time < 10], na.rm = TRUE), 2),
+    
+    # RTs selfish (filtered)
+    rt_mean_self_filter = round(mean(response_time[selfish_choice == 1 & response_time < 10], na.rm = TRUE), 2),
+    rt_sd_self_filter   = round(sd(response_time[selfish_choice == 1 & response_time < 10], na.rm = TRUE), 2),
+    
+    
+    # CONFIDENCE INTERVALS FOR PROSOCIAL
+    ci_lower = round(binom::binom.wilson(sum(pro_social, na.rm = TRUE),
+                                         n(), conf.level = 0.95)$lower * 100, 2),
+    ci_upper = round(binom::binom.wilson(sum(pro_social, na.rm = TRUE),
+                                         n(), conf.level = 0.95)$upper * 100, 2),
+    .groups = "drop"
+  )
+
+
+# Overall summary
+overall_summary <- trial_df %>%
+  summarise(
+    expression = "Overall",
+    condition  = "Overall",
+    N_participants = n_distinct(pid_condition),
+    N_trials       = n(),
+    N_trials_filter = sum(response_time < 10, na.rm = TRUE),
+    pct_excluded    = round((1 - N_trials_filter / N_trials) * 100, 2),
+    prosocial_sum  = sum(pro_social, na.rm = TRUE),
+    prosocial_mean = round(mean(pro_social, na.rm = TRUE) * 100, 2),
+    ci_lower = round(binom::binom.wilson(sum(pro_social, na.rm = TRUE),
+                                         n(), conf.level = 0.95)$lower * 100, 2),
+    ci_upper = round(binom::binom.wilson(sum(pro_social, na.rm = TRUE),
+                                         n(), conf.level = 0.95)$upper * 100, 2)
+  )
+
+# Final combined table
+final_table <- bind_rows(summary_table_exp, overall_summary)
+
+# Save to CSV
+write.csv(final_table, "descriptives.csv", row.names = FALSE)
+
+
+#for ANOVA
+
+participant_summary_anova <- trial_df %>%
+  group_by(pid_overall, condition) %>%
+  summarise(
+    prosocial_rate_anova = mean(pro_social, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+
+#######################################################
+#                                                     #
+#######################################################
+
+#here is sd reporting from pid x condition and pid x condition x expression
+
+# Step 1: Compute prosocial rate per participant per condition and per expression
+participant_expr_cond <- trial_df %>%
+  group_by(pid_overall, condition, expression) %>%
+  summarise(prosocial_rate = mean(pro_social, na.rm = TRUE) * 100,
+            .groups = "drop")
+
+# Step 2a: SD across participant x condition (average over expressions for each participant)
+participant_cond <- participant_expr_cond %>%
+  group_by(pid_overall, condition) %>%
+  summarise(prosocial_rate_avg = mean(prosocial_rate, na.rm = TRUE),
+            .groups = "drop")
+
+# Step 2b: SD across participants per condition (main reportable SD)
+summary_cond <- participant_cond %>%
+  group_by(condition) %>%
+  summarise(mean_rate = mean(prosocial_rate_avg, na.rm = TRUE),
+            sd_rate   = sd(prosocial_rate_avg, na.rm = TRUE),
+            N_participants = n(),
+            .groups = "drop")
+
+# Step 2c: SD across participants x expression (more granular, for plotting or exploratory)
+summary_expr <- participant_expr_cond %>%
+  group_by(condition, expression) %>%
+  summarise(mean_rate = mean(prosocial_rate, na.rm = TRUE),
+            sd_rate   = sd(prosocial_rate, na.rm = TRUE),
+            N_participants = n_distinct(pid_overall),
+            .groups = "drop")
+
+# View summaries
+summary_cond     # SD per condition (inferential)
+summary_expr     # SD per expression × condition (exploratory / visualization
+
+
+
+                          ################################################################################
+                          #                                Plots                                         #
+                          ################################################################################
+
+##########=============###############
+
+
+#plot for all three conditions - side by side
+
+# ---- Aggregate participant-level percentages ----
+plot_df <- trial_df %>%
+  mutate(expression = factor(expression, levels = desired_order)) %>%
+  group_by(pid_condition, expression, condition) %>%
+  summarize(
+    prosocial_rate = mean(pro_social, na.rm = TRUE) * 100,
+    selfish_rate   = mean(selfish_choice, na.rm = TRUE) * 100,
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(prosocial_rate, selfish_rate),
+    names_to = "choice_type",
+    values_to = "percent"
+  )
+
+# ---- Bar plot with jitter, faceted by condition ----
+ggplot(plot_df, aes(x = expression, y = percent, fill = choice_type)) +
+  stat_summary(fun = mean, geom = "bar", 
+               position = position_dodge(width = 0.8), width = 0.7, alpha = 0.5, color = NA) +
+  stat_summary(fun.data = mean_se, geom = "errorbar", 
+               position = position_dodge(width = 0.8), width = 0.2) +
+  geom_jitter(aes(color = choice_type), 
+              position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+              size = 0.6, alpha = 0.7) +
+  scale_fill_manual(values = c("prosocial_rate" = "blue", "selfish_rate" = "red")) +
+  scale_color_manual(values = c("prosocial_rate" = "blue", "selfish_rate" = "red")) +
+  facet_wrap(~condition) +
+  labs(
+    title = "Prosocial vs Selfish Choices by Expression and Condition",
+    x = "Expression",
+    y = "Mean % Choice",
+    fill = "Choice Type",
+    color = "Choice Type"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top",
+    strip.text = element_text(size = 16, face = "bold")
+  )
+
+
+# Clean and prepare the data for trial-level data
+
+plot_data <- trial_df %>%
+  select(pid_condition, expression, response_time, sad_rating, angry_rating, feel_rating, decision, pro_social, selfish_choice) %>%  # only needed columns
+  mutate(
+    expression = factor(expression, levels = desired_order),
+    RT = response_time,
+    sad = sad_rating,
+    angry = angry_rating,
+    feel = feel_rating,
+    prosocial = pro_social,
+    selfish = selfish_choice
+  ) %>%
+  select(-response_time, -sad_rating, -angry_rating, -feel_rating) 
+
+
+plot_data
+# --- Prepare count and percentage data ---
+plot_counts <- plot_data %>%
+  count(expression, decision) #automatically defines and calculates n
+
+plot_pcts <- plot_counts %>%
+  group_by(expression) %>%
+  mutate(percent = n / sum(n) * 100)
+
+plot_pcts
+##########=============###############
+# --- Count plot Count per expression and decision---
+count_plot <- ggplot(plot_counts, aes(x = expression, y = n, fill = decision)) +
+  geom_col(position = position_dodge(width = 0.7)) + #position_dodge places bars side by side
+  geom_text(
+    aes(label = n),
+    position = position_dodge(width = 0.9),
+    vjust = -0.6,
+    size = 4
+  ) +
+  scale_fill_manual(values = c("selfish" = "red", "prosocial" = "darkblue")) +
+  labs(
+    title = "Choice Counts by Expression",
+    x = "Expression Type",
+    y = "Count",
+    fill = "Decision"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+##########=============###############
+# --- Percentage plot per expression and decision ---
+
+pct_plot <- ggplot(plot_pcts, aes(x = expression, y = percent, fill = decision)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),
+    position = position_dodge(width = 0.9),
+    vjust = -0.6,
+    size = 4
+  ) +
+  scale_fill_manual(values = c("selfish" = "red", "prosocial" = "darkblue")) +
+  labs(
+    title = "Choice Percentages by Expression",
+    x = "Expression Type",
+    y = "Percentage",
+    fill = "Decision"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Display plots
+count_plot
+pct_plot
+
+##########=============###############
+# Plot Choice/ Condition/ Expression    #
+##########=============###############
+
+##### Flag Outliers for all conditions.
+
+rt_outlier_all <- trial_df %>%
+  group_by(condition, pid_overall, pid_condition) %>%  # per participant per condition
+  mutate(
+    flag_outlier = response_time > 10                  # TRUE if above 95th percentile
+  ) %>%
+  ungroup()
+
+#### Colors ####
+gradient <- colorRampPalette(c("#012160", "#660000"))(5)
+my_palette <- c("grey", gradient)
+
+#### Participant-level summaries (keep condition!) ####
+participant_summary_prosocial <- rt_outlier_all %>%
+  group_by(pid_overall, expression, condition) %>%
+  summarise(prosocial_rate = mean(pro_social, na.rm = TRUE) * 100, .groups = "drop") %>%
+  mutate(expression = factor(expression, levels = desired_order))
+
+participant_summary_selfish <- rt_outlier_all %>%
+  group_by(pid_overall, expression, condition) %>%
+  summarise(selfish_rate = mean(selfish_choice, na.rm = TRUE) * 100, .groups = "drop") %>%
+  mutate(expression = factor(expression, levels = desired_order))
+
+#### Group means + SE ####
+plot_prosocial <- participant_summary_prosocial %>%
+  group_by(expression, condition) %>%
+  summarise(
+    mean_rate = mean(prosocial_rate, na.rm = TRUE),
+    se = sd(prosocial_rate, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+plot_selfish <- participant_summary_selfish %>%
+  group_by(expression, condition) %>%
+  summarise(
+    mean_rate = mean(selfish_rate, na.rm = TRUE),
+    se = sd(selfish_rate, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+#### Plots ####
+prosocial_plot <- ggplot() +
+  geom_col(data = plot_prosocial, aes(x = expression, y = mean_rate, fill = expression), alpha = 0.6) +
+  geom_errorbar(data = plot_prosocial, aes(x = expression, ymin = mean_rate - se, ymax = mean_rate + se), width = 0.2) +
+  geom_jitter(data = participant_summary_prosocial, 
+              aes(x = expression, y = prosocial_rate, color = expression),
+              alpha = 0.4, width = 0.3, height = 0, size = 2) +
+  scale_fill_manual(values = my_palette) +
+  scale_color_manual(values = my_palette) +
+  labs(title = "Prosocial Choices", x = "Expression", y = "Choice (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        strip.text = element_text(size = 14),
+        legend.position = "none") +
+  facet_wrap(~condition)
+
+prosocial_plot
+
+selfish_plot <- ggplot() +
+  geom_col(data = plot_selfish, aes(x = expression, y = mean_rate, fill = expression), alpha = 0.6) +
+  geom_errorbar(data = plot_selfish, aes(x = expression, ymin = mean_rate - se, ymax = mean_rate + se), width = 0.2) +
+  geom_jitter(data = participant_summary_selfish, 
+              aes(x = expression, y = selfish_rate, color = expression),
+              alpha = 0.4, width = 0.3, height = 0, size = 2) +
+  scale_fill_manual(values = my_palette) +
+  scale_color_manual(values = my_palette) +
+  labs(title = "Selfish Choices (RT < 10s)", x = "Expression", y = "Choice (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        strip.text = element_text(size = 14),
+        legend.position = "none") +
+  facet_wrap(~condition)
+
+selfish_plot
+
+
+########RT Plots###############
+
+# Filter RTs (<= 10s cutoff)
+# -------------------------
+filtered_data_rt <- trial_df %>%
+  filter(response_time <= 10) %>%
+  mutate(expression = factor(expression, levels = desired_order))
+
+# -------------------------
+# Prosocial RT summary
+# -------------------------
+rt_summary_prosocial <- filtered_data_rt %>%
+  filter(pro_social == 1) %>%
+  group_by(expression, condition) %>%
+  summarise(
+    mean_rt = mean(response_time, na.rm = TRUE),
+    se = sd(response_time, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# -------------------------
+# Selfish RT summary
+# -------------------------
+rt_summary_selfish <- filtered_data_rt %>%
+  filter(selfish_choice == 1) %>%
+  group_by(expression, condition) %>%
+  summarise(
+    mean_rt = mean(response_time, na.rm = TRUE),
+    se = sd(response_time, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# -------------------------
+# Plot prosocial RTs
+# -------------------------
+rt_prosocial_plot <- ggplot() +
+  geom_col(data = rt_summary_prosocial, aes(x = expression, y = mean_rt, fill = expression), alpha = 0.6, width = 0.7) +
+  geom_errorbar(data = rt_summary_prosocial, aes(x = expression, ymin = mean_rt - se, ymax = mean_rt + se), width = 0.2, alpha = 0.8) +
+  geom_jitter(data = filtered_data_rt %>% filter(pro_social == 1),
+              aes(x = expression, y = response_time, color = expression),
+              alpha = 0.4, width = 0.15, height = 0, size = 1, shape = 16, stroke = 0) +
+  scale_fill_manual(values = my_palette) +
+  scale_color_manual(values = my_palette) +
+  labs(
+    title = "Reaction Times (Prosocial Choices)",
+    x = "Expression",
+    y = "Reaction Time (seconds)"
+  ) +
+  coord_cartesian(ylim = c(0, 3)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.title = element_text(size = 14),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.position = "none"
+  ) +
+  facet_wrap(~condition)
+
+rt_prosocial_plot
+
+#--------------------------#
+# Plot selfish RTs         #
+#--------------------------#
+rt_selfish_plot <- ggplot() +
+  geom_col(data = rt_summary_selfish, aes(x = expression, y = mean_rt, fill = expression), alpha = 0.6, width = 0.7) +
+  geom_errorbar(data = rt_summary_selfish, aes(x = expression, ymin = mean_rt - se, ymax = mean_rt + se), width = 0.2, alpha = 0.8) +
+  geom_jitter(data = filtered_data_rt %>% filter(selfish_choice == 1),
+              aes(x = expression, y = response_time, color = expression),
+              alpha = 0.4, width = 0.15, height = 0, size = 1, shape = 16, stroke = 0) +
+  scale_fill_manual(values = my_palette) +
+  scale_color_manual(values = my_palette) +
+  labs(
+    title = "Reaction Times (Selfish Choices)",
+    x = "Expression",
+    y = "Reaction Time (seconds)"
+  ) +
+  coord_cartesian(ylim = c(0, 3)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.title = element_text(size = 14),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.position = "none"
+  ) +
+  facet_wrap(~condition)
+
+rt_selfish_plot
+
+# Print plots
+rt_prosocial_plot + rt_selfish_plot
+
+
+################################################################
+#          RT plot for prosocial and selfish - no filter       #
+################################################################
+
+#Pro-social RT summary per expression
+rt_summary_prosocial <- trial_df %>%
+  filter(pro_social == 1) %>%  # only prosocial trials
+  group_by(expression) %>%
+  summarise(
+    mean_rt = mean(response_time, na.rm = TRUE),
+    se = sd(response_time, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  mutate(expression = factor(expression, levels = desired_order))
+
+
+# Selfish RT summary per expression
+rt_summary_selfish <- trial_df %>%
+  filter(selfish_choice == 1) %>%  # only selfish trials
+  group_by(expression) %>%
+  summarise(
+    mean_rt = mean(response_time, na.rm = TRUE),
+    se = sd(response_time, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  mutate(expression = factor(expression, levels = desired_order))
+
+# Trial-level data for jittered points
+filtered_data_prosocial <- trial_df %>%
+  filter(pro_social == 1) %>%
+  mutate(expression = factor(expression, levels = desired_order))
+
+filtered_data_selfish <- trial_df %>%
+  filter(selfish_choice == 1) %>%
+  mutate(expression = factor(expression, levels = desired_order))
+
+# Prosocial RT plot
+rt_prosocial <- ggplot() +
+  geom_col(data = rt_summary_prosocial, aes(x = expression, y = mean_rt, fill = expression), 
+           alpha = 0.6, width = 0.7) +
+  geom_errorbar(data = rt_summary_prosocial, aes(x = expression, ymin = mean_rt - se, ymax = mean_rt + se), 
+                width = 0.2, alpha = 0.8) +
+  geom_jitter(data = filtered_data_prosocial, aes(x = expression, y = response_time, color = expression), 
+              alpha = 0.4, width = 0.15, height = 0, size = 1, shape = 16, stroke = 0) +
+  scale_fill_manual(values = my_palette) +
+  scale_color_manual(values = my_palette) +
+  labs(title = "Prosocial Trials (n=38)", x = "Expression", y = "Reaction Time (s)") +
+  coord_cartesian(ylim = c(0, 4)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+        legend.position = "none")
+
+# Selfish RT plot
+rt_selfish <- ggplot() +
+  geom_col(data = rt_summary_selfish, aes(x = expression, y = mean_rt, fill = expression), 
+           alpha = 0.6, width = 0.7) +
+  geom_errorbar(data = rt_summary_selfish, aes(x = expression, ymin = mean_rt - se, ymax = mean_rt + se), 
+                width = 0.2, alpha = 0.8) +
+  geom_jitter(data = filtered_data_selfish, aes(x = expression, y = response_time, color = expression), 
+              alpha = 0.4, width = 0.15, height = 0, size = 1, shape = 16, stroke = 0) +
+  scale_fill_manual(values = my_palette) +
+  scale_color_manual(values = my_palette) +
+  labs(title = "Selfish Trials (n=38)", x = "Expression", y = "Reaction Time (s)") +
+  coord_cartesian(ylim = c(0, 4)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+        legend.position = "none")
+
+# Combine side by side
+rt_prosocial + rt_selfish
+
+
+#######===========================================#######
+#              plot emotion rating with expression      #
+#######===========================================#######
+
+##########=============###############
+#Plot for prosocial decision for all post-trial emotion ratings
+
+# Convert to long format
+trial_long <- trial_df %>%
+  mutate(expression = factor(expression, levels = desired_order)) %>%
+  pivot_longer(
+    cols = c(sad_rating, angry_rating, feel_rating),
+    names_to = "emotion",
+    values_to = "rating"
+  )
+
+# Summarize by decision, expression, and emotion
+summary_long <- trial_long %>%
+  group_by(decision, expression, emotion) %>%
+  summarise(
+    mean_rating = mean(rating, na.rm = TRUE),
+    se = sd(rating, na.rm = TRUE)/sqrt(n()),
+    .groups = "drop"
+  )
+
+ggplot(summary_long %>% filter(decision == "prosocial"),
+       aes(x = expression, y = mean_rating, fill = emotion)) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = mean_rating - se, ymax = mean_rating + se),
+                width = 0.2, position = position_dodge(0.8)) +
+  scale_fill_manual(values = c("sad_rating" = "blue", 
+                               "angry_rating" = "red", 
+                               "feel_rating" = "green")) +
+  labs(title = "Prosocial: Mean Ratings by Expression and Emotion",
+       x = "Expression", y = "Mean Rating", fill = "Emotion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+##plot for selfish decision for all post-trial emotion ratings
+
+ggplot(summary_long %>% filter(decision == "selfish"),
+       aes(x = expression, y = mean_rating, fill = emotion)) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = mean_rating - se, ymax = mean_rating + se),
+                width = 0.2, position = position_dodge(0.8)) +
+  scale_fill_manual(values = c("sad_rating" = "blue", 
+                               "angry_rating" = "red", 
+                               "feel_rating" = "green")) +
+  labs(title = "Selfish: Mean Ratings by Expression and Emotion",
+       x = "Expression", y = "Mean Rating", fill = "Emotion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+
+##########=============###############
+#line plots for the above side by side
+
+# Reshape data to long format
+trial_long <- trial_df %>%
+  mutate(expression = factor(expression, levels = desired_order)) %>%
+  pivot_longer(
+    cols = c(sad_rating, angry_rating, feel_rating),
+    names_to = "emotion",
+    values_to = "rating"
+  )
+
+# Summarize
+summary_long <- trial_long %>%
+  group_by(decision, expression, emotion) %>%
+  summarise(
+    mean_rating = mean(rating, na.rm = TRUE),
+    se = sd(rating, na.rm = TRUE)/sqrt(n()),
+    .groups = "drop"
+  )
+
+ggplot(summary_long, aes(x = expression, y = mean_rating, color = emotion, group = emotion)) +
+  geom_line(linewidth = 2) +
+  geom_point(size = 3) +
+  facet_wrap(~decision, labeller = labeller(decision = c("prosocial" = "PROSOCIAL", 
+                                                         "selfish" = "SELFISH"))) +   # separate plots for prosocial and selfish
+  scale_color_manual(values = c("sad_rating" = "blue", 
+                                "angry_rating" = "red", 
+                                "feel_rating" = "green")) +
+  labs(title = "Mean Ratings by Expression and Emotion",
+       x = "Expression", y = "Mean Rating", color = "Emotion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+##########=============###############
+
+#Plot BETWEEN TRAIT EMPATHY and prosocial choice proportion with r and p values
+
+# 1. Calculate prosocial rate per participant
+prosocial_df <- trial_df %>%
+  group_by(pid) %>%
+  summarise(
+    prosocial_rate = mean(decision == "prosocial", na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2. Merge with trait empathy data
+meta_data <- left_join(meta_data, prosocial_df, by = "pid")
+
+# 3. Pivot subscales to long format
+df_long <- df %>%
+  pivot_longer(
+    cols = c(persp_te, online_te, emot_contagion_te, periph_resp_te,
+             prox_resp_te, cog_te, aff_te),
+    names_to = "te_subscale",
+    values_to = "te_score"
+  )
+
+# 4. Facetted scatter plot with correlation values
+ggplot(df_long, aes(x = te_score, y = prosocial_rate)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = "loess", se = FALSE, color = "blue") +
+  stat_cor(
+    aes(label = paste(..r.label.., ..p.label.., sep = "~`,`~")),
+    method = "pearson",
+    label.x.npc = "left",
+    label.y.npc = "top",
+    size = 3
+  ) +
+  facet_wrap(~ te_subscale, scales = "free_x") +
+  theme_minimal() +
+  labs(
+    title = "Trait Empathy Subscales vs Prosocial Choices (Dictator Game)",
+    x = "Trait Empathy Score",
+    y = "Prosocial Rate"
+  )
+
+
+                           ################################################################################
+                           #                        Predictors correlation                                #
+                           ################################################################################
+
+##########=============###############
+
+prosocial_summary
+
+# --- TE subscales ---
+te_subscales <- c("te_total", "cog_te", "aff_te", "persp_te", "online_te", "emot_contagion_te", "periph_resp_te", "prox_resp_te")
+cor_matrix_te <- cor(meta_data[, te_subscales], use = "pairwise.complete.obs")
+corrplot(cor_matrix_te, method = "color", addCoef.col = "black",
+         tl.col = "black", number.cex = 0.8, title = "TE subscales")
+
+model_te <- lm(prosocial_summary$prosocial_rate ~ te_total + persp_te + online_te + emot_contagion_te + periph_resp_te + prox_resp_te + cog_te + aff_te,
+               data = meta_data)
+
+vif_values_te <- vif(model_te)
+print(vif_values_te)
+
+# --- Participant-level predictors ---
+participant_predictors <- c("SES", "svo_angle", "Mood", "te_total", "sias_total","Age")
+cor_matrix_participant <- cor(meta_data[, participant_predictors], use = "pairwise.complete.obs")
+corrplot(cor_matrix_participant, method = "color", addCoef.col = "black",
+         tl.col = "black", number.cex = 0.8, title = "Participant-level predictors")
+
+
+
+model_sub_predictors<- lm(prosocial_summary$prosocial_rate ~ SES + svo_angle + Mood + te_total + sias_total +Age, data = meta_data)
+summary(model_sub_predictors)
+vif_values_sub_predictors <- vif(model_sub_predictors)
+print(vif_values_sub_predictors)
+
+
+# --- Neutral face ratings ---
+rating_vars <- c("likeability_rating", "attract_rating", "dominant_rating", "trustworthiness_rating")
+cor_matrix_ratings <- cor(analysis_df[, rating_vars], use = "pairwise.complete.obs")
+corrplot(cor_matrix_ratings, method = "color", addCoef.col = "black",
+         tl.col = "black", number.cex = 0.8, title = "Neutral face ratings")
+
+# Fit a linear model using one rating as outcome and others as predictors
+model_ratings <- lm(likeability_rating ~ attract_rating + dominant_rating + trustworthiness_rating,
+                    data = analysis_df)
+vif_neu_ratings <-vif(model_ratings)
+print(vif_neu_ratings)
+
+#trial level predictors correlation
+trial_emo_rating <- c("sad_rating", "angry_rating", "feel_rating")
+corr_matrix_emo_ratings <- cor(analysis_df[, trial_emo_rating], use = "pairwise.complete.obs")
+corrplot(corr_matrix_emo_ratings, method = "color", addCoef.col = "black",
+         tl.col = "black", number.cex = 0.8, title = "Post-trial Emotion Ratings")
+
+model_trial_ratings <- lm(
+  binary_choice ~ sad_rating + angry_rating + feel_rating,
+  data = analysis_df)
+summary(model_trial_ratings)
+
+
+                                 ##################===============================#######################
+                                 #                 CODE FOR  LINEAR MIXED MODELLING                     #
+                                 ##################=================================#####################
+
+#CENTRE PARTICIPANT LEVEL PREDICTORS FIRST
+
+meta_data_scaled <- meta_data %>%
+  mutate(across(c(SES, svo_angle, Mood, te_total, sias_total), scale))
+
+meta_data_scaled
+
+#combine meta and trial df for modelling
+
+#create a separate df for analysis
+
+analysis_df <- trial_df %>%
+  left_join(meta_data_scaled, by = "pid") %>%
+  # Ensure binary choice is numeric 0/1
+  mutate(binary_choice = ifelse(decision == "prosocial", 1, 0),
+         # Make expression a factor and set 'neutral' as reference
+         expression = factor(expression),
+         expression = relevel(expression, ref = "sad"),
+         rating_sad_c   = sad_rating - mean(sad_rating, na.rm = TRUE),
+         rating_angry_c = angry_rating - mean(angry_rating, na.rm = TRUE),
+         rating_feel_c  = feel_rating - mean(feel_rating, na.rm = TRUE),
+         # center neutral ratings if you want
+         likeability_c       = likeability_rating - mean(likeability_rating, na.rm = TRUE),
+         trustworthiness_c   = trustworthiness_rating - mean(trustworthiness_rating, na.rm = TRUE),
+         attract_c           = attract_rating - mean(attract_rating, na.rm = TRUE),
+         dominant_c          = dominant_rating - mean(dominant_rating, na.rm = TRUE)
+         )
+
+# Optcheck first few rows
+head(analysis_df)
+
+analysis_df$SES        <- scale(analysis_df$SES)
+analysis_df$svo_angle  <- scale(analysis_df$svo_angle)
+analysis_df$Mood       <- scale(analysis_df$Mood)
+analysis_df$Age        <- scale(analysis_df$Age)
+analysis_df$te_total   <- scale(analysis_df$te_total)
+analysis_df$sias_total <- scale(analysis_df$sias_total)
+analysis_df$trustworthiness_rating <- scale(analysis_df$trustworthiness_rating)
+analysis_df$attract_rating<- scale(analysis_df$attract_rating)
+analysis_df$dominant_rating <- scale(analysis_df$dominant_rating)
+analysis_df$sad_rating <- scale(analysis_df$sad_rating)
+analysis_df$angry_rating <- scale(analysis_df$angry_rating)
+analysis_df$feel_rating <- scale(analysis_df$feel_rating)
+
+car::vif(lm(pro_social ~ SES + svo_angle + Mood + Age + te_total + sias_total, 
+            data = analysis_df))
+
+#linear mixed model: prosocial choice
+model_prosocial <- glmer(pro_social ~ expression + SES + svo_angle + Mood + Age +
+                          te_total + sias_total + 
+                          (1 | pid), 
+                        data = analysis_df,
+                        family = binomial,
+                        control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5)))
+
+summary(model_prosocial)
+plogis(estimate)
+
+
+###modelling with trial and face level covariates
+
+model_prosocial_1 <-glmer(
+  pro_social ~ expression + trustworthiness_c + attract_c + dominant_c +
+    feel_rating + sad_rating + angry_rating + 
+    SES + Mood + Age + svo_angle + te_total +
+    (1 + expression | pid),
+  data = analysis_df,
+  family = binomial,  # or binomial if your outcome is binary
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(model_prosocial_1)
+
+
+model_prosocial_2 <-glmer(
+  pro_social ~ expression + trustworthiness_c + attract_c + dominant_c +
+    feel_rating + sad_rating + angry_rating + 
+    SES + Mood + Age + svo_angle + te_total +
+    (1 | pid),
+  data = analysis_df,
+  family = binomial,  # or binomial if your outcome is binary
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(model_prosocial_2)
+
+
+model_prosocial_3 <-glmer(
+  pro_social ~ expression + attract_c + 
+    feel_rating + sad_rating + angry_rating + 
+    SES + Mood + svo_angle +
+    (1 | pid),
+  data = analysis_df,
+  family = binomial,  # or binomial if your outcome is binary
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(model_prosocial_3)
+print(model_prosocial_3, correlation=TRUE)
+
+model_rt <- lmer(
+  response_time ~ expression + attract_c + 
+    feel_rating + sad_rating + angry_rating + 
+    SES + Mood + svo_angle  + (1 | pid),
+  data = analysis_df
+)
+summary(model_rt)
+
+
+model_rt_1 <- lmer(
+  response_time ~ expression + 
+    feel_rating + sad_rating + 
+    (1 + expression| pid),
+  data = analysis_df
+)
+summary(model_rt_1)
+
+##############RT plot
+
+# Extract fixed effects and focus on expression terms
+tidy_model <- broom.mixed::tidy(model_binarychoice, effects = "fixed") %>% #Converts the mixed-effects model model_binarychoice into a tidy data frame with one row per fixed effect.
+  filter(grepl("expression", term)) %>%
+  mutate(term = gsub("expression", "", term))  # clean up labels
+
+# Plot estimates with standard errors
+ggplot(tidy_model, aes(x = term, y = estimate)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = estimate - std.error, ymax = estimate + std.error), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Effect of Facial Expressions (Reference: Sad)",
+       x = "Expression",
+       y = "Estimated log-odds (with SE)") +
+  theme_minimal(base_size = 14) +
+  coord_flip()
+
+analysis_df <- analysis_df %>%
+  mutate(expression = factor(expression, levels = desired_order))
+
+# Refit model if needed
+model_rt <- lmer(
+  response_time ~ expression + te_total + svo_angle + SES + Mood + (1 | pid),
+  data = analysis_df
+)
+
+# Get emmeans in the desired order
+emm_expr <- emmeans(model_rt, ~ expression)
+emm_df <- as.data.frame(emm_expr)
+
+# Relevel factor in emm_df
+emm_df$expression <- factor(emm_df$expression, levels = desired_order)
+
+# Plot with desired order
+ggplot(emm_df, aes(x = expression, y = emmean)) +
+  geom_bar(stat = "identity", fill = "red", alpha = 0.7) +
+  geom_errorbar(aes(ymin = emmean - SE, ymax = emmean + SE), width = 0.2) +
+  theme_minimal(base_size = 14) +
+  labs(
+    x = "Expression",
+    y = "Predicted Reaction Time (s)",
+    title = "Predicted RTs by Expression (controlling covariates)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+emm_df
+
+
+
+##mixed effects model
+
+AIC(model_prosocial, model_prosocial_1, model_prosocial_2, model_prosocial_3)
+
+
+# Create prediction dataframe
+pred_data <- analysis_df %>%
+  summarise(
+    sad_rating = mean(sad_rating, na.rm = TRUE),
+    angry_rating = mean(angry_rating, na.rm = TRUE),
+    feel_rating = mean(feel_rating, na.rm = TRUE),
+    SES = mean(SES, na.rm = TRUE),
+    Mood = mean(Mood, na.rm = TRUE),
+    Age = mean(Age, na.rm = TRUE),
+    svo_angle = mean(svo_angle, na.rm = TRUE)
+  ) %>%
+  slice(rep(1, length(unique(analysis_df$expression)))) %>%
+  mutate(expression = unique(analysis_df$expression))
+
+
+# Predict on logit scale with SE
+pred_logit <- predict(final_model, newdata = pred_data, re.form = NA, se.fit = TRUE)
+
+pred_data <- pred_data %>%
+  mutate(
+    fit = pred_logit$fit,
+    se = pred_logit$se.fit,
+    # 95% CI on logit scale
+    lower_logit = fit - 1.96 * se,
+    upper_logit = fit + 1.96 * se,
+    # Transform to probability scale
+    prob = plogis(fit),
+    lower = plogis(lower_logit),
+    upper = plogis(upper_logit)
+  )
+
+pred_data$expression <- factor(pred_data$expression, levels = desired_order)
+
+
+ggplot(pred_data, aes(x = expression, y = prob)) +
+  geom_col(fill = "steelblue", alpha = 0.7) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  ylim(0, 1) +
+  labs(
+    title = "Predicted Probability of Pro-social Behavior per Expression",
+    x = "Expression",
+    y = "Predicted Probability (with 95% CI)"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+
+
